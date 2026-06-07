@@ -1,0 +1,35 @@
+# conda environment for the RewriterLLM project.
+#
+# IMPORTANT — PyTorch CUDA wheel:
+#   This file installs torch without a CUDA index URL, which may resolve the CPU build.
+#   After `conda env create -f environment.yml && conda activate editor`, run:
+#
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+#   Replace cu121 with the highest CUxx at or below your driver's max CUDA version
+#   (shown in the top-right of `nvidia-smi`). See module_1_environment.md §5, Step 2.
+#
+# Reproduction from lock file (second machine):
+#   conda create -n editor python=3.10 -y && conda activate editor
+#   pip install -r requirements.lock.txt
+#   (then rebuild llama.cpp and re-clone auto-antislop per module_1_environment.md §5)
+
+name: editor
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - torch
+    - torchvision
+    - unsloth
+    - transformers
+    - datasets
+    - trl
+    - peft
+    - accelerate
+    - bitsandbytes
+    - spacy
+    - sentence-transformers
+    - pytest

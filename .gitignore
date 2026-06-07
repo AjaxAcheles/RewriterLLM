@@ -1,0 +1,33 @@
+# --- large binary / generated data (do not commit) ---
+data/raw_texts/
+models/
+llama.cpp/
+auto-antislop/
+antislop_data/
+checkpoints/
+
+# --- environment / build artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+*.lock
+!requirements.lock.txt
+
+# --- machine-specific reports (reproduced per-run) ---
+reports/env_manifest.txt
+
+# --- IDE / OS noise ---
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# --- what IS committed ---
+# data/*.jsonl       (datasets produced by the pipeline)
+# reports/*.json     (eval results — small, human-readable)
+# requirements.lock.txt
+# all scripts/ and tests/
