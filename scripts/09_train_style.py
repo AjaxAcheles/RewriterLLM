@@ -57,7 +57,64 @@ from pathlib import Path
 def main(base_model="models/ftpo_model", pairs_path="data/style_pairs.jsonl",
          output_dir="models/style_lora"):
     """Train the style-conditioning adapter on top of the M7 FTPO model."""
-    raise NotImplementedError
+    import torch
+    from pathlib import Path as P
+    from unsloth import FastLanguageModel
+    from datasets import load_dataset
+    from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+    try:
+        from scripts.prompt_config import RESPONSE_TEMPLATE
+    except ImportError:
+        from prompt_config import RESPONSE_TEMPLATE
+
+    if not P(pairs_path).exists():
+        raise SystemExit(
+            f"Style pairs not found: {pairs_path}. "
+            "Run: python scripts/build_style_pairs.py"
+        )
+
+    MAX_SEQ = 8192
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        base_model, max_seq_length=MAX_SEQ, dtype=None, load_in_4bit=True
+    )
+    model = FastLanguageModel.get_peft_model(
+        model, r=16, lora_alpha=16, lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_gradient_checkpointing="unsloth", random_state=42,
+    )
+
+    ds = load_dataset("json", data_files={"train": pairs_path})
+    response_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
+    collator = DataCollatorForCompletionOnlyLM(response_ids, tokenizer=tokenizer)
+
+    trainer = SFTTrainer(
+        model=model, tokenizer=tokenizer,
+        train_dataset=ds["train"], data_collator=collator,
+        dataset_text_field="text", max_seq_length=MAX_SEQ,
+        args=SFTConfig(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            num_train_epochs=2,
+            learning_rate=5e-5,
+            warmup_steps=20,
+            lr_scheduler_type="cosine",
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            optim="adamw_8bit",
+            logging_steps=25,
+            output_dir="checkpoints/style",
+            report_to="none",
+        ),
+    )
+    trainer.train()
+
+    P(output_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print(f"Style pass complete → {output_dir}")
+    print("Run: python scripts/run_eval.py models/style_lora reports/style_eval.json")
 
 
 if __name__ == "__main__":

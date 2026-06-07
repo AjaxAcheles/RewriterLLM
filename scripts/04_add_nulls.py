@@ -47,8 +47,31 @@ from pathlib import Path
 def main(filtered="data/filtered_pairs.jsonl", excerpts="data/raw_excerpts.jsonl",
          out="data/null_pairs.jsonl", fraction=0.12, seed=42):
     """Sample clean excerpts and write them as null-edit pairs."""
-    raise NotImplementedError
+    n_filtered = sum(1 for _ in open(filtered))
+    pool = [json.loads(l) for l in open(excerpts)]
+    random.seed(seed)
+    n_nulls = min(int(n_filtered * fraction), len(pool))
+    sample = random.sample(pool, n_nulls)
+
+    with open(out, "w") as f:
+        for e in sample:
+            f.write(json.dumps({
+                "id":      f"null_{e['id']}",
+                "clean":   e["text"],
+                "sloppy":  e["text"],  # byte-identical — no edit needed
+                "teacher": "null",
+            }) + "\n")
+
+    print(f"Wrote {len(sample)} null pairs ({fraction:.0%} of {n_filtered} filtered pairs)")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--filtered",  default="data/filtered_pairs.jsonl")
+    parser.add_argument("--excerpts",  default="data/raw_excerpts.jsonl")
+    parser.add_argument("--output",    default="data/null_pairs.jsonl")
+    parser.add_argument("--fraction",  type=float, default=0.12)
+    parser.add_argument("--seed",      type=int,   default=42)
+    args = parser.parse_args()
+    main(args.filtered, args.excerpts, args.output, args.fraction, args.seed)

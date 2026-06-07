@@ -51,19 +51,60 @@ from sentence_transformers import SentenceTransformer, util
 nlp = spacy.load("en_core_web_sm")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-_NER_LABELS = {"PERSON", "GPE", "LOC", "ORG", "FAC", "NORP"}
+_NER_LABELS = {"PERSON", "GPE", "LOC", "ORG", "FAC"}
 
 
 def ner_overlap(clean, sloppy):
     """Fraction of clean-side entities that appear in sloppy side. Returns 1.0 if no entities."""
-    raise NotImplementedError
+    clean_ents = {e.text.lower() for e in nlp(clean).ents if e.label_ in _NER_LABELS}
+    if not clean_ents:
+        return 1.0
+    sloppy_ents = {e.text.lower() for e in nlp(sloppy).ents if e.label_ in _NER_LABELS}
+    return len(clean_ents & sloppy_ents) / len(clean_ents)
 
 
 def main(raw="data/raw_pairs.jsonl", out="data/filtered_pairs.jsonl",
          min_ner=0.90, min_sem=0.80, max_sem=0.97):
     """Filter raw_pairs.jsonl and write kept pairs with overlap/sim scores appended."""
-    raise NotImplementedError
+    pairs = [json.loads(l) for l in open(raw)]
+    print(f"Loaded {len(pairs)} pairs. Batch-encoding for efficiency...")
+
+    # Batch-encode all texts at once (10-50x faster than one-at-a-time encoding)
+    cleans  = [p["clean"]  for p in pairs]
+    sloppys = [p["sloppy"] for p in pairs]
+    all_embs = embedder.encode(cleans + sloppys, show_progress_bar=True, convert_to_tensor=True)
+    clean_embs  = all_embs[:len(pairs)]
+    sloppy_embs = all_embs[len(pairs):]
+
+    kept = dropped = 0
+    with open(out, "w") as fout:
+        for i, p in enumerate(pairs):
+            n = ner_overlap(p["clean"], p["sloppy"])
+            s = float(util.cos_sim(clean_embs[i], sloppy_embs[i]))
+            if n >= min_ner and min_sem <= s <= max_sem:
+                p["ner_overlap"] = round(n, 3)
+                p["sem_sim"]     = round(s, 3)
+                fout.write(json.dumps(p) + "\n")
+                kept += 1
+            else:
+                dropped += 1
+
+    total = kept + dropped
+    rate = kept / total if total else 0
+    print(f"Kept {kept} | Dropped {dropped} | Keep rate {rate:.1%}")
+    if total and rate > 0.90:
+        print("WARNING: keep>90% — tighten max_sem to 0.94")
+    if total and rate < 0.40:
+        print("WARNING: keep<40% — revisit Module 4 generation prompt")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input",   default="data/raw_pairs.jsonl")
+    parser.add_argument("--output",  default="data/filtered_pairs.jsonl")
+    parser.add_argument("--min-ner", type=float, default=0.90)
+    parser.add_argument("--min-sem", type=float, default=0.80)
+    parser.add_argument("--max-sem", type=float, default=0.97)
+    args = parser.parse_args()
+    main(args.input, args.output, args.min_ner, args.min_sem, args.max_sem)

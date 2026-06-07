@@ -1,0 +1,28 @@
+# Core training stack
+torch
+torchvision
+unsloth
+transformers
+datasets
+trl
+peft
+accelerate
+bitsandbytes
+
+# NLP utilities
+spacy
+sentence-transformers
+
+# Testing
+pytest
+
+# Notes:
+# 1. Install PyTorch with the correct CUDA index URL for your driver:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#    Replace cu121 with the highest CUxx shown in nvidia-smi.
+#
+# 2. After installing spaCy, download the English model:
+#      python -m spacy download en_core_web_sm
+#
+# 3. llama.cpp and auto-antislop must be built/cloned separately.
+#    See project_outline/module_1_environment.md §5.

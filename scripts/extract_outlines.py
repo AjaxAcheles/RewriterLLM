@@ -54,7 +54,32 @@ Key implementation notes:
 """
 
 import json
+import re
+import subprocess
 from pathlib import Path
+
+EXTRACTION_PROMPT = """You are a structural analyst. Read this prose excerpt and extract a structured outline.
+
+EXCERPT:
+{text}
+
+Extract the outline as a JSON object with EXACTLY these four keys:
+{{
+  "characters": [{{"name": "...", "role": "..."}}],
+  "setting": "location and time description",
+  "events": ["event 1 [because ... / leading to ...]", "event 2", ...],
+  "pov_state": "narrator/POV name: knows [X], feels [Y as fact, not prose]"
+}}
+
+Rules:
+- characters: list every named character with their role in this scene
+- setting: one sentence, location + time context
+- events: ordered list, each with causal link where possible
+- pov_state: fact form only — "grief over X" not "sorrow washed over her"
+- Do NOT add events that are implied but not stated
+- Output ONLY valid JSON, nothing else
+
+JSON:"""
 
 
 def load_checkpoint(output_path):
@@ -70,15 +95,68 @@ def extract_outline(excerpt_text, teacher_fn):
 
     teacher_fn: callable(prompt: str) -> str
     Returns: {"characters": [...], "setting": str, "events": [...], "pov_state": str}
-    TODO: implement prompt construction, LLM call, and JSON parsing with retry.
     """
-    raise NotImplementedError
+    prompt = EXTRACTION_PROMPT.format(text=excerpt_text)
+    raw = teacher_fn(prompt)
+
+    json_match = re.search(r'\{[\s\S]*\}', raw)
+    if not json_match:
+        raise ValueError(f"No JSON found in teacher response: {raw[:200]}")
+
+    try:
+        outline = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        fixed = json_match.group().replace("'", '"')
+        outline = json.loads(fixed)
+
+    required = {"characters", "setting", "events", "pov_state"}
+    missing = required - set(outline.keys())
+    if missing:
+        raise ValueError(f"Outline missing keys: {missing}")
+
+    return outline
 
 
 def main(excerpts_path="data/raw_excerpts.jsonl", output_path="data/outlines.json",
          batch_size=50):
     """Extract outlines for all excerpts not yet in the checkpoint."""
-    raise NotImplementedError
+    outlines = load_checkpoint(output_path)
+    done_ids = set(outlines.keys())
+
+    excerpts = [json.loads(l) for l in open(excerpts_path)]
+    todo = [e for e in excerpts if e["id"] not in done_ids]
+    print(f"Already done: {len(done_ids)} | Remaining: {len(todo)}")
+
+    llama_cli = "llama.cpp/build/bin/llama-cli"
+    teacher_model = next(iter(sorted(Path("models/teachers").glob("*.gguf"))), None)
+    if not teacher_model:
+        raise SystemExit("No teacher GGUF found in models/teachers/. Download one first.")
+
+    def teacher_fn(prompt):
+        cmd = [llama_cli, "--model", str(teacher_model),
+               "--n-gpu-layers", "28", "--ctx-size", "4096",
+               "--n-predict", "512", "--temp", "0.1",
+               "--no-display-prompt", "--prompt", prompt]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            return r.stdout.strip()
+        except subprocess.TimeoutExpired:
+            return ""
+
+    failed = 0
+    for i in range(0, len(todo), batch_size):
+        batch = todo[i:i + batch_size]
+        for e in batch:
+            try:
+                outline = extract_outline(e["text"], teacher_fn)
+                outlines[e["id"]] = {"id": e["id"], "outline": outline}
+            except Exception as ex:
+                print(f"  FAILED {e['id']}: {ex}")
+                failed += 1
+        Path(output_path).write_text(json.dumps(outlines, indent=2))
+        print(f"  Checkpointed {min(i + batch_size, len(todo))}/{len(todo)}")
+
+    print(f"Done. {len(outlines)} outlines written; {failed} failed.")
 
 
 if __name__ == "__main__":

@@ -48,8 +48,12 @@ import json
 import sys
 import torch
 from pathlib import Path
-from scripts.eval_metrics import evaluate_pair
-from scripts.prompt_config import build_messages
+try:
+    from scripts.eval_metrics import evaluate_pair
+    from scripts.prompt_config import build_messages
+except ImportError:
+    from eval_metrics import evaluate_pair
+    from prompt_config import build_messages
 
 MODEL_DIR = sys.argv[1] if len(sys.argv) > 1 else "models/ftpo_model"
 REPORT = sys.argv[2] if len(sys.argv) > 2 else "reports/eval.json"
@@ -73,15 +77,56 @@ def tier(metric, value):
 
 
 def edit(model, tokenizer, sloppy):
-    """Run the model on a single sloppy excerpt and return the decoded output string.
-    TODO: implement inference call.
-    """
-    raise NotImplementedError
+    """Run the model on a single sloppy excerpt and return the decoded output string."""
+    ids = tokenizer.apply_chat_template(
+        build_messages(sloppy),
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=False,
+        return_tensors="pt",
+    ).to("cuda")
+    with torch.no_grad():
+        out = model.generate(
+            input_ids=ids, max_new_tokens=1024, temperature=0.3,
+            do_sample=True, repetition_penalty=1.1,
+        )
+    return tokenizer.decode(out[0][ids.shape[1]:], skip_special_tokens=True)
 
 
 def main():
     """Load model, evaluate test set, print table, write report."""
-    raise NotImplementedError
+    from unsloth import FastLanguageModel
+
+    model, tok = FastLanguageModel.from_pretrained(
+        MODEL_DIR, max_seq_length=8192, dtype=None, load_in_4bit=True
+    )
+    FastLanguageModel.for_inference(model)
+
+    test_pairs = [json.loads(l) for l in open("data/test_raw.jsonl")]
+    results = [
+        evaluate_pair(p["sloppy"], edit(model, tok, p["sloppy"]), p.get("clean"))
+        for p in test_pairs
+    ]
+
+    # Average only numeric (non-bool) fields
+    numeric = [k for k, v in results[0].items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    avg = {k: sum(r[k] for r in results) / len(results) for k in numeric}
+    avg["burstiness_improved_rate"] = (
+        sum(r["burstiness_improved"] for r in results) / len(results)
+    )
+
+    print(f"\n── Evaluation: {MODEL_DIR} ──")
+    for k in TIERS:
+        val = avg.get(k, float("nan"))
+        print(f"  {k:28s} {val:7.3f}   [{tier(k, val)}]")
+    print("  (informational)")
+    for k in ("slop_in", "slop_out", "semantic_sim", "burstiness_out"):
+        print(f"  {k:28s} {avg.get(k, float('nan')):7.3f}")
+
+    Path(REPORT).parent.mkdir(parents=True, exist_ok=True)
+    json.dump(avg, open(REPORT, "w"), indent=2)
+    print(f"\nReport → {REPORT}")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ excerpt is a coherent scene fragment with a single setting and continuous POV. T
 splitting is explicitly avoided: it produces mid-sentence cuts that break coherence and
 confuse the outline extractor in M3.
 
-IDs are a 12-character SHA-256 prefix of the excerpt text. This makes segmentation
+IDs are a 12-character MD5 prefix of the excerpt text. This makes segmentation
 idempotent — re-running on the same corpus produces the same IDs. M3, M4, and M5 all
 use the excerpt ID as their join key, so ID stability is load-bearing.
 
@@ -32,29 +32,89 @@ Key implementation notes:
     excerpts, the expected yield is ~80,000 excerpts — sample down if needed, but never up.
 """
 
+import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
+
+GUT_START = re.compile(r"\*\*\*\s*START OF.*?\*\*\*", re.IGNORECASE | re.DOTALL)
+GUT_END   = re.compile(r"\*\*\*\s*END OF.*?\*\*\*",   re.IGNORECASE | re.DOTALL)
+
+
+def strip_boilerplate(text):
+    s = GUT_START.search(text)
+    if s:
+        text = text[s.end():]
+    e = GUT_END.search(text)
+    if e:
+        text = text[:e.start()]
+    return text.strip()
+
+
+def printable_ratio(s):
+    if not s:
+        return 0.0
+    good = sum(c.isalpha() or c.isspace() or c in ".,;:!?'\"-" for c in s)
+    return good / len(s)
 
 
 def excerpt_id(text):
-    """Stable 12-char ID from the SHA-256 of the excerpt text (UTF-8)."""
-    return hashlib.sha256(text.encode()).hexdigest()[:12]
+    """Stable 12-char ID from the MD5 of the excerpt text (UTF-8)."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
 
 def segment_book(text, min_words=300, max_words=700):
     """Split a book's full text into boundary-aligned excerpts.
 
     Yields dicts with keys: text, word_count.
-    TODO: implement paragraph-boundary splitting logic.
     """
-    raise NotImplementedError
+    cleaned = strip_boilerplate(text)
+    paras = [p.strip() for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+    out, cur, n = [], [], 0
+    for p in paras:
+        w = len(p.split())
+        if w > max_words and not cur:
+            continue
+        if n + w > max_words and n >= min_words:
+            excerpt = " ".join(cur)
+            if printable_ratio(excerpt) >= 0.9:
+                yield {"text": excerpt, "word_count": n}
+            cur, n = [p], w
+        else:
+            cur.append(p)
+            n += w
+    if n >= min_words:
+        excerpt = " ".join(cur)
+        if printable_ratio(excerpt) >= 0.9:
+            yield {"text": excerpt, "word_count": n}
 
 
 def main(input_dir="data/raw_texts", output_path="data/raw_excerpts.jsonl"):
     """Read all .txt files in input_dir, segment, and write to output_path."""
-    raise NotImplementedError
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    seen, n = set(), 0
+    with open(output_path, "w") as out:
+        for path in sorted(Path(input_dir).glob("**/*.txt")):
+            try:
+                text = path.read_text(errors="ignore")
+            except Exception:
+                continue
+            for seg in segment_book(text):
+                uid = excerpt_id(seg["text"])
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                out.write(json.dumps({"id": uid, "source": path.name,
+                                      "text": seg["text"],
+                                      "word_count": seg["word_count"]}) + "\n")
+                n += 1
+    print(f"Wrote {n} excerpts from {input_dir} to {output_path}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="data/raw_texts")
+    parser.add_argument("--output", default="data/raw_excerpts.jsonl")
+    args = parser.parse_args()
+    main(args.input, args.output)

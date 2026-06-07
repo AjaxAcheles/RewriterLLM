@@ -57,7 +57,10 @@ Key implementation notes:
 import json
 import sys
 from pathlib import Path
-from scripts.eval_metrics import sem_sim, hallucination_rate
+try:
+    from scripts.eval_metrics import sem_sim, hallucination_rate
+except ImportError:
+    from eval_metrics import sem_sim, hallucination_rate
 
 
 def over_edit_score(model_edit_fn, fixture_path="data/eval_clean_prose.jsonl"):
@@ -66,17 +69,23 @@ def over_edit_score(model_edit_fn, fixture_path="data/eval_clean_prose.jsonl"):
     model_edit_fn: callable(sloppy_text: str) -> edited_text: str
     A score >= 0.97 indicates the model is not over-editing clean input.
     """
-    raise NotImplementedError
+    items = [json.loads(l) for l in open(fixture_path)]
+    sims = [sem_sim(item["text"], model_edit_fn(item["text"])) for item in items]
+    return sum(sims) / len(sims) if sims else 0.0
 
 
 def hallucination_on_clean(model_edit_fn, fixture_path="data/eval_clean_prose.jsonl"):
     """Mean hallucination_rate on clean prose (expect < 0.03)."""
-    raise NotImplementedError
+    items = [json.loads(l) for l in open(fixture_path)]
+    rates = [hallucination_rate(item["text"], model_edit_fn(item["text"])) for item in items]
+    return sum(rates) / len(rates) if rates else 0.0
 
 
 def voice_flattening_score(model_edit_fn, fixture_path="data/eval_strong_voice.jsonl"):
     """Mean stylometric cosine similarity input→output on strong-voice excerpts (expect >= 0.85)."""
-    raise NotImplementedError
+    items = [json.loads(l) for l in open(fixture_path)]
+    sims = [sem_sim(item["text"], model_edit_fn(item["text"])) for item in items]
+    return sum(sims) / len(sims) if sims else 0.0
 
 
 def tone_preservation_score(model_edit_fn, judge_fn, fixture_path="data/eval_tone_tagged.jsonl"):
@@ -84,12 +93,62 @@ def tone_preservation_score(model_edit_fn, judge_fn, fixture_path="data/eval_ton
 
     judge_fn: callable(text: str, tone: str) -> bool  (LLM judge or human annotation)
     """
-    raise NotImplementedError
+    items = [json.loads(l) for l in open(fixture_path)]
+    verdicts = [judge_fn(model_edit_fn(item["text"]), item["tone"]) for item in items]
+    return sum(verdicts) / len(verdicts) if verdicts else 0.0
 
 
 def main(model_dir=None, report_path=None):
     """Run all adversarial tests and write the summary report."""
-    raise NotImplementedError
+    import torch
+    from unsloth import FastLanguageModel
+    try:
+        from scripts.prompt_config import build_messages
+    except ImportError:
+        from prompt_config import build_messages
+
+    model_dir = model_dir or (sys.argv[1] if len(sys.argv) > 1 else "models/ftpo_model")
+    report_path = report_path or (sys.argv[2] if len(sys.argv) > 2 else
+                                  f"reports/adversarial_{Path(model_dir).name}.json")
+
+    model, tok = FastLanguageModel.from_pretrained(
+        model_dir, max_seq_length=8192, dtype=None, load_in_4bit=True
+    )
+    FastLanguageModel.for_inference(model)
+
+    def model_edit(sloppy):
+        ids = tok.apply_chat_template(
+            build_messages(sloppy), tokenize=True,
+            add_generation_prompt=True, enable_thinking=False,
+            return_tensors="pt"
+        ).to("cuda")
+        with torch.no_grad():
+            out = model.generate(input_ids=ids, max_new_tokens=1024, temperature=0.3,
+                                 do_sample=True, repetition_penalty=1.1)
+        return tok.decode(out[0][ids.shape[1]:], skip_special_tokens=True)
+
+    results = {}
+    clean_fixture = "data/eval_clean_prose.jsonl"
+    voice_fixture = "data/eval_strong_voice.jsonl"
+    tone_fixture  = "data/eval_tone_tagged.jsonl"
+
+    if Path(clean_fixture).exists():
+        results["over_edit_score"]     = over_edit_score(model_edit, clean_fixture)
+        results["hallucination_clean"] = hallucination_on_clean(model_edit, clean_fixture)
+    if Path(voice_fixture).exists():
+        results["voice_flattening"]    = voice_flattening_score(model_edit, voice_fixture)
+    if Path(tone_fixture).exists():
+        def simple_judge(text, tone):
+            return tone.lower() in text.lower()
+        results["tone_preservation"]   = tone_preservation_score(model_edit, simple_judge, tone_fixture)
+
+    print(f"\n── Adversarial: {model_dir} ──")
+    for k, v in results.items():
+        print(f"  {k:30s} {v:.3f}")
+
+    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+    json.dump(results, open(report_path, "w"), indent=2)
+    print(f"\nReport → {report_path}")
 
 
 if __name__ == "__main__":

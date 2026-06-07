@@ -59,9 +59,53 @@ Key implementation notes:
     fix the prompt here instead.
 """
 
+import argparse
 import json
 import subprocess
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Teacher configuration — add/remove entries here, one per model family.
+# Adjust n_gpu_layers to the max that loads without OOM on your GPU.
+# ---------------------------------------------------------------------------
+TEACHERS = {
+    "llama3": {
+        "path": "models/teachers/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        "n_gpu_layers": 28,
+        "slop_block": (
+            "- Overused words: tapestry, delve, testament, vibrant, navigate, resonate\n"
+            "- Empty transitions: Furthermore, Moreover, It is worth noting that\n"
+            "- Tell emotions directly rather than showing them"
+        ),
+    },
+    "mistral": {
+        "path": "models/teachers/mistral-7b-instruct-v0.2.Q4_K_M.gguf",
+        "n_gpu_layers": 30,
+        "slop_block": (
+            "- Parallel three-part structures and snappy triads\n"
+            "- Unearned pivots: 'Something shifted', 'Everything changed'\n"
+            "- Overused words: shimmered, nuanced, embark, realm, underscore"
+        ),
+    },
+}
+
+SLOP_PROMPT_TEMPLATE = """You are generating a deliberately AI-style draft of a story segment.
+
+REQUIRED story elements — you MUST include ALL of these exactly:
+{outline}
+
+Write the segment using these AI writing patterns:
+{slop_block}
+
+STRICT RULES:
+- Keep ALL character names, locations, and events IDENTICAL to the outline
+- Do NOT add any character, location, or event not listed above
+- Do NOT change the order of events
+- Length: approximately {length} words
+
+Draft:"""
+
+LLAMA_CLI = "llama.cpp/build/bin/llama-cli"
 
 
 def load_existing_ids(output_path):
@@ -72,29 +116,123 @@ def load_existing_ids(output_path):
     return {json.loads(line)["id"] for line in p.open()}
 
 
+def _outline_to_text(outline_entry):
+    """Convert an outline dict (or raw string) to a structured text block."""
+    if isinstance(outline_entry, str):
+        return outline_entry
+    outline = outline_entry.get("outline", outline_entry)
+    chars = outline.get("characters", [])
+    char_str = "\n".join(
+        f"  - {c['name']}: {c['role']}" if isinstance(c, dict) else f"  - {c}"
+        for c in chars
+    ) or "  (none named)"
+    events = outline.get("events", [])
+    events_str = "\n".join(f"  {i+1}. {e}" for i, e in enumerate(events))
+    setting = outline.get("setting", "")
+    pov = outline.get("pov_state", "")
+    return (
+        f"CHARACTERS:\n{char_str}\n"
+        f"SETTING: {setting}\n"
+        f"EVENTS (in order):\n{events_str}\n"
+        f"POV STATE: {pov}"
+    )
+
+
+def build_slop_prompt(excerpt, outline, slop_block):
+    """Build the full teacher prompt that produces a sloppy rewrite.
+
+    The outline's events are enumerated explicitly so the teacher hits every beat.
+    `excerpt` is used to derive the target length so output length matches the original.
+    """
+    return SLOP_PROMPT_TEMPLATE.format(
+        outline=_outline_to_text(outline),
+        slop_block=slop_block,
+        length=len(excerpt.split()),
+    )
+
+
 def call_teacher(llama_cli, model_path, prompt, n_gpu_layers=20, max_tokens=1024):
-    """Invoke llama-cli and return the generated text.
-
-    llama_cli: path to the compiled llama-cli binary (e.g. "llama.cpp/build/bin/llama-cli")
-    TODO: implement subprocess call with appropriate flags.
-    """
-    raise NotImplementedError
-
-
-def build_slop_prompt(excerpt, outline):
-    """Build the teacher prompt that produces a sloppy rewrite.
-
-    The outline's events must be enumerated explicitly so the teacher hits every beat.
-    TODO: implement prompt template.
-    """
-    raise NotImplementedError
+    """Invoke llama-cli and return the generated text, or None on failure."""
+    cmd = [
+        llama_cli, "--model", model_path,
+        "--n-gpu-layers", str(n_gpu_layers),
+        "--ctx-size", "4096",
+        "--n-predict", str(max_tokens),
+        "--temp", "0.85",
+        "--repeat-penalty", "1.1",
+        "--no-display-prompt",
+        "--prompt", prompt,
+    ]
+    for attempt in range(2):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=480)
+            out = r.stdout.strip()
+            if len(out.split()) >= 100:
+                return out
+        except subprocess.TimeoutExpired:
+            print(f"  timeout (attempt {attempt + 1})")
+    return None
 
 
 def main(excerpts_path="data/raw_excerpts.jsonl", outlines_path="data/outlines.json",
          output_path="data/raw_pairs.jsonl", teachers=None):
     """Generate sloppy pairs for all excerpts × all teachers not yet in the checkpoint."""
-    raise NotImplementedError
+    if not Path(LLAMA_CLI).exists():
+        raise SystemExit(
+            f"llama-cli not found at {LLAMA_CLI}. "
+            "Build llama.cpp with: cmake -B build -DGGML_CUDA=ON && cmake --build build -j$(nproc)"
+        )
+
+    active_teachers = {
+        k: v for k, v in TEACHERS.items()
+        if (teachers is None or k in teachers) and Path(v["path"]).exists()
+    }
+    if not active_teachers:
+        raise SystemExit(
+            "No teacher GGUF files found. Download to models/teachers/:\n"
+            "  wget -P models/teachers/ https://huggingface.co/bartowski/"
+            "Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+        )
+
+    outlines = json.load(open(outlines_path))
+    written = load_existing_ids(output_path)
+    total_new = 0
+
+    with open(output_path, "a") as out_f:
+        for line in open(excerpts_path):
+            item = json.loads(line)
+            iid = item["id"]
+            if iid not in outlines:
+                continue
+            for name, cfg in active_teachers.items():
+                pair_id = f"{iid}_{name}"
+                if pair_id in written:
+                    continue
+                prompt = build_slop_prompt(item["text"], outlines[iid], cfg["slop_block"])
+                sloppy = call_teacher(
+                    LLAMA_CLI, cfg["path"], prompt,
+                    n_gpu_layers=cfg["n_gpu_layers"],
+                    max_tokens=min(len(item["text"].split()) + 200, 1000),
+                )
+                if sloppy:
+                    out_f.write(json.dumps({
+                        "id": pair_id, "clean": item["text"],
+                        "sloppy": sloppy, "teacher": name,
+                    }) + "\n")
+                    out_f.flush()
+                    written.add(pair_id)
+                    total_new += 1
+                    if total_new % 100 == 0:
+                        print(f"  Generated {total_new} new pairs...")
+
+    print(f"Generation complete. New pairs this run: {total_new}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--excerpts", default="data/raw_excerpts.jsonl")
+    parser.add_argument("--outlines", default="data/outlines.json")
+    parser.add_argument("--output",   default="data/raw_pairs.jsonl")
+    parser.add_argument("--teachers", nargs="+")
+    args = parser.parse_args()
+    main(args.excerpts, args.outlines, args.output, args.teachers)

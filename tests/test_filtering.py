@@ -6,6 +6,7 @@
 # pytest tests/test_filtering.py -v
 import json
 from pathlib import Path
+import pytest
 
 FILTERED  = "data/filtered_pairs.jsonl"
 NULLS     = "data/null_pairs.jsonl"
@@ -13,6 +14,12 @@ TRAIN     = "data/train.jsonl"
 VAL       = "data/val.jsonl"
 TEST      = "data/test.jsonl"
 TEST_RAW  = "data/test_raw.jsonl"
+
+if not Path(FILTERED).exists():
+    pytest.skip(
+        "data/filtered_pairs.jsonl not found — run scripts/03_filter_pairs.py first",
+        allow_module_level=True,
+    )
 
 
 def _load(path):

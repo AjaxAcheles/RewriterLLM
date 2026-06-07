@@ -7,6 +7,13 @@
 # pytest tests/test_generation.py -v
 import json
 from pathlib import Path
+import pytest
+
+if not Path("data/raw_pairs.jsonl").exists():
+    pytest.skip(
+        "data/raw_pairs.jsonl not yet generated — run scripts/02_generate_pairs.py first",
+        allow_module_level=True,
+    )
 
 
 def _load():
@@ -14,41 +21,49 @@ def _load():
 
 
 def test_minimum_raw_pair_count():
-    # Must produce >= 4,500 raw pairs before filtering.
-    # Target: >= 2,250 base excerpts × >= 2 teachers.
-    # M5 will filter to ~2,000; the raw pool must be large enough that filtered >= 1,800.
-    pass
+    pairs = _load()
+    assert len(pairs) >= 4500, (
+        f"Only {len(pairs)} raw pairs; need >= 4500 so >= 1,800 survive M5 curation. "
+        "Generate more excerpts or add another teacher."
+    )
 
 
 def test_pair_id_format():
-    # Every pair ID must follow the format {base_excerpt_id}_{teacher_name}.
-    # The underscore separator is relied on by 05_format_dataset.py's base_id() function.
-    # IDs without an underscore will cause the split logic to treat every pair as a unique base.
-    pass
+    for p in _load():
+        assert "_" in p["id"], (
+            f"Pair ID '{p['id']}' has no underscore — base_id() in 05_format_dataset.py "
+            "will treat it as its own base, breaking the leakage-free split."
+        )
 
 
 def test_multiple_teachers_present():
-    # At least 2 distinct teacher names must appear in the corpus.
-    # A single teacher means the student learns to remove one model's tics, not general slop.
-    pass
+    teachers = {p["teacher"] for p in _load()}
+    assert len(teachers) >= 2, (
+        f"Only {teachers}; need >= 2 teacher families for slop diversity. "
+        "Add a second teacher GGUF and re-run generation."
+    )
 
 
 def test_clean_and_sloppy_fields():
-    # Every pair must have non-empty "clean" and "sloppy" fields.
-    # An empty field would train the model to generate empty output.
-    pass
+    for p in _load():
+        assert p.get("clean", "").strip(), f"Empty 'clean' field in pair {p['id']}"
+        assert p.get("sloppy", "").strip(), f"Empty 'sloppy' field in pair {p['id']}"
 
 
 def test_sloppy_differs_from_clean():
-    # At least 90% of pairs must have sloppy != clean (byte comparison).
-    # Near-identical pairs that somehow escaped generation should not be in the raw file;
-    # they will be caught by the M5 upper similarity bound but a large fraction here
-    # indicates the teacher is not injecting slop effectively.
-    pass
+    pairs = _load()
+    identical = sum(1 for p in pairs if p["clean"] == p["sloppy"])
+    frac_identical = identical / len(pairs) if pairs else 0
+    assert frac_identical < 0.10, (
+        f"{frac_identical:.1%} of raw pairs are identical (clean == sloppy). "
+        "Raise temperature or strengthen slop injection in the teacher prompt."
+    )
 
 
 def test_checkpoint_resumes_correctly():
-    # Running 02_generate_pairs.py twice should NOT produce duplicate pair IDs.
-    # This confirms the checkpoint/resume logic is working correctly.
-    # (Test by checking the raw_pairs.jsonl has no duplicate IDs.)
-    pass
+    pairs = _load()
+    ids = [p["id"] for p in pairs]
+    assert len(ids) == len(set(ids)), (
+        f"{len(ids) - len(set(ids))} duplicate pair IDs found. "
+        "The checkpoint/resume logic is not deduplicating correctly."
+    )

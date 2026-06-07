@@ -59,7 +59,10 @@ import torch
 from unsloth import FastLanguageModel
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
-from scripts.prompt_config import RESPONSE_TEMPLATE
+try:
+    from scripts.prompt_config import RESPONSE_TEMPLATE
+except ImportError:
+    from prompt_config import RESPONSE_TEMPLATE
 
 # ---------------------------------------------------------------------------
 # Toggle between prototype (4B) and final (7B) runs here.
@@ -71,7 +74,71 @@ OUTPUT_DIR = "models/sft_lora"
 
 
 def main():
-    raise NotImplementedError
+    is_4b = "4B" in MODEL
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=MODEL, max_seq_length=MAX_SEQ, dtype=None, load_in_4bit=True
+    )
+    model = FastLanguageModel.get_peft_model(
+        model, r=RANK, lora_alpha=RANK, lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_gradient_checkpointing="unsloth", random_state=42,
+    )
+
+    ds = load_dataset("json", data_files={
+        "train":      "data/train.jsonl",
+        "validation": "data/val.jsonl",
+    })
+
+    # Completion-only loss: only compute loss on the assistant response.
+    # This prevents the model from learning to copy its input (the most common silent failure).
+    # Pass token IDs not the string to avoid the "response key not found" TRL gotcha.
+    response_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
+    collator = DataCollatorForCompletionOnlyLM(response_ids, tokenizer=tokenizer)
+
+    trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=ds["train"],
+        eval_dataset=ds["validation"],
+        data_collator=collator,
+        dataset_text_field="text",
+        max_seq_length=MAX_SEQ,
+        dataset_num_proc=2,
+        args=SFTConfig(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=4 if is_4b else 8,
+            num_train_epochs=3,
+            learning_rate=2e-4 if is_4b else 1e-4,
+            warmup_steps=50,
+            lr_scheduler_type="cosine",
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            optim="adamw_8bit",
+            weight_decay=0.01,
+            packing=False,
+            logging_steps=25,
+            eval_steps=100,
+            save_steps=200,
+            save_total_limit=3,
+            output_dir="checkpoints/sft",
+            report_to="none",
+        ),
+    )
+
+    trainer.train()
+
+    # Save adapters
+    model.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+
+    # Merge to 16-bit for M7 profiling
+    model.save_pretrained_merged(
+        "models/sft_merged", tokenizer, save_method="merged_16bit"
+    )
+
+    print("SFT complete. Run: python scripts/run_eval.py models/sft_lora reports/sft_baseline.json")
 
 
 if __name__ == "__main__":

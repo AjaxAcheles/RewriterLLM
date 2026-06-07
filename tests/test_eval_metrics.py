@@ -7,13 +7,26 @@
 # This is the FIRST test file that can go green after the conda environment is set up.
 #
 # pytest tests/test_eval_metrics.py -v
-from scripts.eval_metrics import (
-    slop_score,
-    burstiness,
-    ner_preservation,
-    hallucination_rate,
-    sem_sim,
-)
+import pytest
+pytest.importorskip("spacy", reason="spacy not installed — run in the editor conda env")
+pytest.importorskip("sentence_transformers", reason="sentence-transformers not installed — run in the editor conda env")
+
+try:
+    from scripts.eval_metrics import (
+        slop_score,
+        burstiness,
+        ner_preservation,
+        hallucination_rate,
+        sem_sim,
+    )
+except ImportError:
+    from eval_metrics import (
+        slop_score,
+        burstiness,
+        ner_preservation,
+        hallucination_rate,
+        sem_sim,
+    )
 
 # ---------------------------------------------------------------------------
 # Representative test texts

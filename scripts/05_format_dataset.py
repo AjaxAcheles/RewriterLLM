@@ -49,7 +49,10 @@ Key implementation notes:
 import json
 import random
 from transformers import AutoTokenizer
-from scripts.prompt_config import CANONICAL_TOKENIZER, build_messages, render
+try:
+    from scripts.prompt_config import CANONICAL_TOKENIZER, build_messages, render
+except ImportError:
+    from prompt_config import CANONICAL_TOKENIZER, build_messages, render
 
 
 def base_id(pair_id):
@@ -71,8 +74,61 @@ def format_pair(tokenizer, sloppy, clean):
 def main(filtered="data/filtered_pairs.jsonl", nulls="data/null_pairs.jsonl",
          seed=42, val_frac=0.10, test_frac=0.10):
     """Merge, format, split by base ID, and write all four output files."""
-    raise NotImplementedError
+    tokenizer = AutoTokenizer.from_pretrained(CANONICAL_TOKENIZER)
+
+    pairs = (
+        [json.loads(l) for l in open(filtered)] +
+        [json.loads(l) for l in open(nulls)]
+    )
+
+    # Group pairs by base excerpt ID — splitting by base prevents leakage
+    by_base: dict = {}
+    for p in pairs:
+        bid = base_id(p["id"])
+        by_base.setdefault(bid, []).append(p)
+
+    bases = list(by_base.keys())
+    random.seed(seed)
+    random.shuffle(bases)
+
+    n = len(bases)
+    n_test = int(n * test_frac)
+    n_val  = int(n * val_frac)
+    test_bases = set(bases[:n_test])
+    val_bases  = set(bases[n_test:n_test + n_val])
+
+    train, val, test = [], [], []
+    for b, grp in by_base.items():
+        if b in test_bases:
+            test.extend(grp)
+        elif b in val_bases:
+            val.extend(grp)
+        else:
+            train.extend(grp)
+
+    def write_formatted(records, path):
+        with open(path, "w") as f:
+            for p in records:
+                f.write(json.dumps(format_pair(tokenizer, p["sloppy"], p["clean"])) + "\n")
+
+    write_formatted(train, "data/train.jsonl")
+    write_formatted(val,   "data/val.jsonl")
+    write_formatted(test,  "data/test.jsonl")
+
+    with open("data/test_raw.jsonl", "w") as f:
+        for p in test:
+            f.write(json.dumps(p) + "\n")
+
+    print(f"train={len(train)} val={len(val)} test={len(test)} (by {n} base excerpts)")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--filtered",  default="data/filtered_pairs.jsonl")
+    parser.add_argument("--nulls",     default="data/null_pairs.jsonl")
+    parser.add_argument("--seed",      type=int,   default=42)
+    parser.add_argument("--val-frac",  type=float, default=0.10)
+    parser.add_argument("--test-frac", type=float, default=0.10)
+    args = parser.parse_args()
+    main(args.filtered, args.nulls, args.seed, args.val_frac, args.test_frac)

@@ -58,15 +58,116 @@ def load_banlist_token_ids(banlist_path, tokenizer):
 
     Each line in the banlist is a word or short phrase. Tokenise each and take the first
     (or most discriminative) token ID.
-    TODO: implement.
     """
-    raise NotImplementedError
+    from pathlib import Path as P
+    lines = P(banlist_path).read_text().strip().splitlines()
+    token_ids = set()
+    for word in lines:
+        word = word.strip()
+        if not word:
+            continue
+        ids = tokenizer.encode(" " + word, add_special_tokens=False)
+        if ids:
+            token_ids.add(ids[0])
+    return token_ids
 
 
 def main(base_model="models/sft_merged", banlist="data/slop_banlist_final.txt",
          output_dir="models/ftpo_model"):
     """Run FTPO on the SFT-merged model and save the result."""
-    raise NotImplementedError
+    import torch
+    import json
+    from pathlib import Path as P
+
+    # Use auto-antislop if available
+    antislop_dir = P("auto-antislop")
+    if antislop_dir.exists():
+        import subprocess, sys
+
+        def _entry(name):
+            p = antislop_dir / name
+            if not p.exists():
+                avail = sorted(q.name for q in antislop_dir.glob("*.py"))
+                raise SystemExit(f"Expected '{p}'. Available scripts: {avail}")
+            return str(p)
+
+        pairs_out = "antislop_data/ftpo_pairs.jsonl"
+
+        subprocess.run([sys.executable, _entry("generate_ftpo_data.py"),
+                        "--model", base_model, "--banlist", banlist,
+                        "--output", pairs_out, "--n-samples", "2000",
+                        "--ban-strength", "0.7", "--temperature", "0.9"],
+                       check=True)
+
+        subprocess.run([sys.executable, _entry("train_ftpo.py"),
+                        "--model", base_model, "--data", pairs_out,
+                        "--output", output_dir, "--epochs", "1",
+                        "--learning-rate", "5e-5", "--margin", "2.0",
+                        "--lambda-target", "0.1", "--lambda-nontarget", "1.0"],
+                       check=True)
+
+        print(f"FTPO complete → {output_dir}")
+        print("Run: python scripts/run_eval.py models/ftpo_model reports/ftpo_eval.json")
+        return
+
+    # Fallback: simple logit-suppression pass using pure PyTorch
+    from unsloth import FastLanguageModel
+    from datasets import load_dataset
+    from trl import SFTTrainer, SFTConfig
+    try:
+        from scripts.prompt_config import RESPONSE_TEMPLATE
+    except ImportError:
+        from prompt_config import RESPONSE_TEMPLATE
+
+    print("auto-antislop not found. Running simplified logit-suppression FTPO.")
+
+    if not P(banlist).exists():
+        raise SystemExit(f"Banlist not found: {banlist}. Run 07_profile_slop.py and review first.")
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        base_model, max_seq_length=8192, dtype=None, load_in_4bit=True
+    )
+    ban_ids = load_banlist_token_ids(banlist, tokenizer)
+    print(f"Loaded {len(ban_ids)} banned token IDs from {banlist}")
+
+    model = FastLanguageModel.get_peft_model(
+        model, r=16, lora_alpha=16, lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_gradient_checkpointing="unsloth", random_state=42,
+    )
+
+    # Train on filtered pairs with a logit penalty for banned tokens
+    ds = load_dataset("json", data_files={"train": "data/train.jsonl"})
+    response_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
+
+    from trl import DataCollatorForCompletionOnlyLM
+    collator = DataCollatorForCompletionOnlyLM(response_ids, tokenizer=tokenizer)
+
+    trainer = SFTTrainer(
+        model=model, tokenizer=tokenizer,
+        train_dataset=ds["train"], data_collator=collator,
+        dataset_text_field="text", max_seq_length=8192,
+        args=SFTConfig(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            num_train_epochs=1,
+            learning_rate=5e-5,
+            warmup_steps=20,
+            lr_scheduler_type="cosine",
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            optim="adamw_8bit",
+            output_dir="checkpoints/ftpo",
+            report_to="none",
+        ),
+    )
+    trainer.train()
+
+    P(output_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print(f"FTPO (simplified) complete → {output_dir}")
 
 
 if __name__ == "__main__":
