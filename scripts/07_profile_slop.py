@@ -173,7 +173,13 @@ def main(model_dir="models/sft_merged", output_path="reports/slop_profile.json",
 
     print(f"Profile written to {output_path}")
     print(f"Draft banlist written to {banlist_path}")
-    print("NEXT STEP: Human review of banlist — prune genre-legitimate words before running FTPO")
+    print()
+    print("NEXT STEP — REQUIRED BEFORE RUNNING 08_train_ftpo.py:")
+    print("  1. Open data/slop_banlist_draft.txt")
+    print("  2. Remove any genre-legitimate words (e.g. 'shimmered' in fantasy, 'realm' in historical fiction)")
+    print("  3. Save the pruned file as: data/slop_banlist_final.txt")
+    print("     cp data/slop_banlist_draft.txt data/slop_banlist_final.txt  # then edit")
+    print("  4. Run: python scripts/08_train_ftpo.py")
     print("\nTop 20 residual patterns:")
     for e in profile[:20]:
         print(f"  {e['pattern']:40s} delta={e['delta']:+.3f} "

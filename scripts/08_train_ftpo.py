@@ -51,6 +51,7 @@ Key implementation notes:
 """
 
 from pathlib import Path
+import torch
 
 
 def load_banlist_token_ids(banlist_path, tokenizer):
@@ -110,16 +111,16 @@ def main(base_model="models/sft_merged", banlist="data/slop_banlist_final.txt",
         print("Run: python scripts/run_eval.py models/ftpo_model reports/ftpo_eval.json")
         return
 
-    # Fallback: simple logit-suppression pass using pure PyTorch
+    # Fallback: logit-suppression FTPO using pure PyTorch (no auto-antislop)
     from unsloth import FastLanguageModel
     from datasets import load_dataset
-    from trl import SFTTrainer, SFTConfig
+    from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
     try:
         from scripts.prompt_config import RESPONSE_TEMPLATE
     except ImportError:
         from prompt_config import RESPONSE_TEMPLATE
 
-    print("auto-antislop not found. Running simplified logit-suppression FTPO.")
+    print("auto-antislop not found. Running logit-suppression FTPO fallback.")
 
     if not P(banlist).exists():
         raise SystemExit(f"Banlist not found: {banlist}. Run 07_profile_slop.py and review first.")
@@ -137,14 +138,47 @@ def main(base_model="models/sft_merged", banlist="data/slop_banlist_final.txt",
         use_gradient_checkpointing="unsloth", random_state=42,
     )
 
-    # Train on filtered pairs with a logit penalty for banned tokens
     ds = load_dataset("json", data_files={"train": "data/train.jsonl"})
     response_ids = tokenizer.encode(RESPONSE_TEMPLATE, add_special_tokens=False)
-
-    from trl import DataCollatorForCompletionOnlyLM
     collator = DataCollatorForCompletionOnlyLM(response_ids, tokenizer=tokenizer)
 
-    trainer = SFTTrainer(
+    class FTPOTrainer(SFTTrainer):
+        """SFTTrainer subclass that adds per-token logit-space MSE penalties for banned tokens.
+
+        For each forward pass, after computing the standard completion-only CE loss, this
+        trainer adds a penalty proportional to how far each banned token's logit exceeds
+        `margin`. Tokens already below `margin` are unaffected (margin deactivation).
+        """
+        def __init__(self, ban_ids, margin=-5.0, penalty_weight=0.1, **kwargs):
+            super().__init__(**kwargs)
+            self._ban_ids = sorted(ban_ids)
+            self.margin = margin
+            self.penalty_weight = penalty_weight
+            self._ban_tensor = None
+
+        def _ban_tensor_on(self, device):
+            if self._ban_tensor is None or self._ban_tensor.device != device:
+                self._ban_tensor = torch.tensor(
+                    self._ban_ids, dtype=torch.long, device=device
+                )
+            return self._ban_tensor
+
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            outputs = model(**inputs)
+            loss = outputs.loss  # completion-only CE loss from masked labels
+
+            # Logit-space MSE penalty: push banned token logits below `margin`
+            logits = outputs.logits  # (batch, seq_len, vocab_size)
+            ban_t = self._ban_tensor_on(logits.device)
+            ban_logits = logits[:, :, ban_t]  # (batch, seq_len, n_banned)
+            excess = torch.clamp(ban_logits - self.margin, min=0.0)
+            penalty = self.penalty_weight * (excess ** 2).mean()
+            loss = loss + penalty
+
+            return (loss, outputs) if return_outputs else loss
+
+    trainer = FTPOTrainer(
+        ban_ids=ban_ids, margin=-5.0, penalty_weight=0.1,
         model=model, tokenizer=tokenizer,
         train_dataset=ds["train"], data_collator=collator,
         dataset_text_field="text", max_seq_length=8192,
