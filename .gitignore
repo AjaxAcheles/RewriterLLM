@@ -8,6 +8,7 @@ checkpoints/
 
 # --- environment / build artifacts ---
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.pyd
@@ -20,14 +21,18 @@ __pycache__/
 # --- machine-specific reports (reproduced per-run) ---
 reports/env_manifest.txt
 
-# --- IDE / OS noise ---
+# --- IDE / OS / AI tools noise ---
 .vscode/
 .idea/
+.claude/
+.claude-flow/
 *.DS_Store
 Thumbs.db
 
 # --- what IS committed ---
 # data/*.jsonl       (datasets produced by the pipeline)
+# .mcp.json           (local MCP server configuration)
+# CLAUDE.md           (project-level AI instructions)
 # reports/*.json     (eval results — small, human-readable)
 # requirements.lock.txt
 # all scripts/ and tests/

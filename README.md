@@ -37,6 +37,9 @@ The setup script creates the `editor` conda environment, installs all dependenci
 > pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 > ```
 > Replace `cu121` with the highest CUxx at or below your driver's max CUDA version (visible in `nvidia-smi`).
+> **CUDA compilation note:** If you are running a modern Linux distribution with a recent `glibc`, CUDA toolkit compilations (like `llama.cpp`) may fail due to a missing `noexcept(true)` specifier in `math_functions.h`. 
+> 
+> The `00_setup.sh` script will automatically detect this and attempt to safely patch the CUDA header using `sed`. You may be prompted for your `sudo` password during this step. A backup of your original header is automatically saved as `math_functions.h.bak`.
 
 ### 2. Download teacher models
 
